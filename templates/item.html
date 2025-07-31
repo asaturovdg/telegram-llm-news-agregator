@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Запись #{{ item_id }}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://unpkg.com/htmx.org@1.9.6"></script>
+</head>
+<body>
+    <div class="container mt-4">
+        <!-- <a href="/" class="btn btn-secondary mb-3">← Назад</a> -->
+        <div class="card mb-3">
+            <div class="card-header">
+                <a href={{ item.link }}>
+                    <h2>{{ item.channel }}</h2>
+                </a>
+                <small class="text-muted">{{ item.date }}</small>
+            </div>
+        </div>
+        
+        <!-- Кнопки "Назад", "Предыдущая", "Следующая" -->
+        <div class="d-flex justify-content-between mb-3">
+            <div>
+                <a href="/?page={{ page }}&per_page={{ per_page }}&search={{ search }}&only_relevant={{ only_relevant }}&has_keywords={{ has_keywords }}&sort_keywords={{ sort_keywords }}" 
+                class="btn btn-secondary">
+                    ← Назад к списку
+                </a>
+                {% if prev_id is not none %}
+                <a href="/item/{{ prev_id }}?search={{ search }}&only_relevant={{ only_relevant }}&has_keywords={{ has_keywords }}&page={{ page }}&per_page={{ per_page }}&sort_keywords={{ sort_keywords }}" 
+                class="btn btn-outline-primary">
+                    ← Предыдущая
+                </a>
+                {% endif %}
+            </div>
+            <div>
+                {% if next_id is not none %}
+                <a href="/item/{{ next_id }}?search={{ search }}&only_relevant={{ only_relevant }}&has_keywords={{ has_keywords }}&page={{ page }}&per_page={{ per_page }}&sort_keywords={{ sort_keywords }}" 
+                class="btn btn-outline-primary">
+                    Следующая →
+                </a>
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- После card-header, перед row с текстами -->
+        <div class="card mb-3">
+            <div class="card-header bg-info text-white">
+                <h5>Ключевые слова</h5>
+            </div>
+            <div class="card-body">
+                <div class="d-flex flex-wrap gap-2">
+                    {% for keyword in item.matched_keywords %}
+                    <span class="badge bg-primary">{{ keyword }}</span>
+                    {% else %}
+                    <span class="text-muted">Нет ключевых слов</span>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+
+        <!-- Две колонки: text и giga_summary -->
+        <div class="row">
+            <div class="col-md-6">
+                <div class="card h-100">
+                    <div class="card-header bg-light">
+                        <h5>Исходный текст</h5>
+                        <div class="form-check form-switch">
+                            <form 
+                                hx-post="/item/{{ item_id }}/set_relevant" 
+                                hx-trigger="change" 
+                                hx-target="body"
+                            >
+                                <input 
+                                    type="checkbox" 
+                                    class="form-check-input" 
+                                    name="is_relevant" 
+                                    id="is_relevant" 
+                                    {% if item.is_relevant %}checked{% endif %}
+                                >
+                                <label class="form-check-label" for="is_relevant">Полезный</label>
+                            </form>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <pre class="card-text">{{ item.text }}</pre>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card h-100">
+                    <div class="card-header bg-light">
+                        <h5>Summary</h5>
+                    </div>
+                    <div class="card-body">
+                        <pre class="card-text">{{ item.summary }}</pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    document.addEventListener('keydown', (e) => {
+        {% if prev_id is not none %}
+        if (e.key === 'ArrowLeft') {
+            window.location.href = "/item/{{ prev_id }}?search={{ search }}&page={{ page }}&per_page={{ per_page }}&only_relevant={{ only_relevant }}&has_keywords={{ has_keywords }}&sort_keywords={{ sort_keywords }}";
+        }
+        {% endif %}
+        {% if next_id is not none %}
+        if (e.key === 'ArrowRight') {
+            window.location.href = "/item/{{ next_id }}?search={{ search }}&page={{ page }}&per_page={{ per_page }}&only_relevant={{ only_relevant }}&has_keywords={{ has_keywords }}&sort_keywords={{ sort_keywords }}";
+        }
+        {% endif %}
+    });
+});
+</script>
+</body>
+</html>

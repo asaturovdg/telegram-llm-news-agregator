@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JSON Просмотрщик</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+    <script src="https://unpkg.com/htmx.org@1.9.6"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</head>
+<body>
+
+    <div class="container mt-4">
+        <h1 class="mb-4">
+            Записи ({{ total }})
+            {% if current_file %}
+            <small class="text-muted d-block fs-6">Файл: {{ current_file }}</small>
+            {% endif %}
+        </h1>
+        
+        <div class="scraping-control mb-4">
+        <div class="d-flex gap-3 align-items-center">
+            <button
+                id="scrapingBtn"
+                class="btn btn-outline-secondary"
+                onclick="startScraping()"
+            >
+                <span class="btn-content">
+                    <i class="bi bi-arrow-repeat"></i>
+                    <span>Обновить данные</span>
+                </span>
+                <span id="scrapingSpinner" class="scraping-spinner" style="display: none;">
+                    <span class="spinner-border spinner-border-sm"></span>
+                </span>
+            </button>
+            
+            <div class="d-flex align-items-center gap-2">
+                <input type="file" id="jsonFileInput" accept=".json" style="display: none;" onchange="loadJsonFile()">
+                <button
+                    class="btn btn-outline-primary"
+                    onclick="document.getElementById('jsonFileInput').click()"
+                >
+                    <i class="bi bi-upload"></i>
+                    Загрузить JSON
+                </button>
+                
+                <button
+                    class="btn btn-outline-info"
+                    onclick="showFileSelector()"
+                >
+                    <i class="bi bi-folder2-open"></i>
+                    Выбрать файл
+                </button>
+            </div>
+        </div>
+        <small id="scrapingStatus" class="text-muted d-block mt-1"></small>
+        <small id="loadStatus" class="text-muted d-block mt-1"></small>
+    </div>
+
+    <!-- Most Keywords Summary Section -->
+    {% if metadata and metadata.most_keywords_summary %}
+    <div class="card mb-4">
+        <div class="card-header">
+            <h5 class="mb-0">
+                <i class="bi bi-star-fill text-warning"></i>
+                Топ-10 постов с наибольшим количеством ключевых слов
+            </h5>
+        </div>
+        <div class="card-body">
+            <div class="row">
+                {% for post in metadata.most_keywords_summary.top_posts %}
+                <div class="col-md-6 mb-3">
+                    <div class="card h-100">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <small class="text-muted">{{ post.channel }}</small>
+                            <span class="badge bg-primary">{{ post.keyword_count }} <i class="bi bi-tags"></i></span>
+                        </div>
+                        <div class="card-body">
+                            <p class="card-text">{{ post.summary }}</p>
+                            <div class="mb-2">
+                                <small class="text-muted">Ключевые слова:</small>
+                                <div class="mt-1">
+                                    {% for keyword in post.keywords %}
+                                    <span class="badge bg-light text-dark me-1">{{ keyword }}</span>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                            <div class="d-flex justify-content-between align-items-center">
+                                <small class="text-muted">{{ post.date}}</small>
+                                <a href="{{ post.link }}" target="_blank" class="btn btn-sm btn-outline-primary">
+                                    <i class="bi bi-box-arrow-up-right"></i> Открыть
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            <div class="mt-3">
+                <small class="text-muted">
+                    Всего постов: {{ metadata.most_keywords_summary.total_posts }}
+                </small>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <script>
+    let statusPollingInterval = null;
+    let cooldownInterval = null;
+    
+    // Save scroll position before page reload
+    function saveScrollPosition() {
+        sessionStorage.setItem('scrollPosition', window.scrollY);
+    }
+    
+    // Restore scroll position after page load
+    function restoreScrollPosition() {
+        const savedPosition = sessionStorage.getItem('scrollPosition');
+        if (savedPosition) {
+            window.scrollTo(0, parseInt(savedPosition));
+            sessionStorage.removeItem('scrollPosition');
+        }
+    }
+    
+    // Add click handlers to filter and sort buttons
+    document.addEventListener('DOMContentLoaded', function() {
+        // Restore scroll position
+        restoreScrollPosition();
+        
+        // Add click handlers to filter and sort buttons
+        const filterButtons = document.querySelectorAll('a[href*="only_relevant"], a[href*="has_keywords"], a[href*="sort_keywords"]');
+        filterButtons.forEach(button => {
+            button.addEventListener('click', saveScrollPosition);
+        });
+        
+        // Add click handlers to pagination links
+        const paginationLinks = document.querySelectorAll('.pagination a');
+        paginationLinks.forEach(link => {
+            link.addEventListener('click', saveScrollPosition);
+        });
+        
+        // Check initial scraping status (for cooldown)
+        checkInitialScrapingStatus();
+    });
+    
+    // Check initial scraping status on page load
+    async function checkInitialScrapingStatus() {
+        try {
+            const response = await fetch('/scraping-status');
+            const data = await response.json();
+            
+            if (data.status === 'cooldown') {
+                updateScrapingButton('cooldown', `Подождите ${data.remaining}с`, 'btn-secondary', true);
+                updateScrapingStatus(`Кнопка недоступна еще ${data.remaining} секунд`, 'text-muted');
+                startCooldownCountdown(data.remaining);
+            }
+        } catch (error) {
+            console.error('Ошибка при проверке начального статуса:', error);
+        }
+    }
+    
+    // Function to load JSON file
+    async function loadJsonFile() {
+        const fileInput = document.getElementById('jsonFileInput');
+        const file = fileInput.files[0];
+        const loadStatus = document.getElementById('loadStatus');
+        
+        if (!file) {
+            return;
+        }
+        
+        // Show loading status
+        loadStatus.textContent = 'Загрузка файла...';
+        loadStatus.className = 'text-info d-block mt-1';
+        
+        const formData = new FormData();
+        formData.append('file', file);
+        
+        try {
+            const response = await fetch('/load-json', {
+                method: 'POST',
+                body: formData
+            });
+            
+            const data = await response.json();
+            
+            if (data.status === 'success') {
+                loadStatus.textContent = data.message;
+                loadStatus.className = 'text-success d-block mt-1';
+                
+                // Reload page to show new data
+                setTimeout(() => {
+                    window.location.reload();
+                }, 1000);
+            } else {
+                loadStatus.textContent = data.message;
+                loadStatus.className = 'text-danger d-block mt-1';
+            }
+        } catch (error) {
+            console.error('Ошибка при загрузке файла:', error);
+            loadStatus.textContent = 'Ошибка при загрузке файла';
+            loadStatus.className = 'text-danger d-block mt-1';
+        }
+        
+        // Clear file input
+        fileInput.value = '';
+    }
+    
+    // Function to show file selector modal
+    async function showFileSelector() {
+        try {
+            const response = await fetch('/available-files');
+            const data = await response.json();
+            
+            const fileList = document.getElementById('fileList');
+            fileList.innerHTML = '';
+            
+            if (data.files.length === 0) {
+                fileList.innerHTML = '<div class="text-muted text-center p-3">Нет доступных JSON файлов</div>';
+            } else {
+                data.files.forEach(file => {
+                    const fileItem = document.createElement('div');
+                    fileItem.className = 'list-group-item list-group-item-action d-flex justify-content-between align-items-center';
+                    
+                    const fileInfo = document.createElement('div');
+                    fileInfo.innerHTML = `
+                        <div class="fw-bold">${file.name}</div>
+                        <small class="text-muted">
+                            ${file.type === 'uploaded' ? '📁 Загруженный файл' : 
+                              file.type === 'pipeline' ? '⚙️ Результат pipeline' : '📄 Корневой файл'}
+                        </small>
+                    `;
+                    
+                    const loadButton = document.createElement('button');
+                    loadButton.className = 'btn btn-sm btn-primary';
+                    loadButton.textContent = 'Загрузить';
+                    loadButton.onclick = () => loadSelectedFile(file.path);
+                    
+                    fileItem.appendChild(fileInfo);
+                    fileItem.appendChild(loadButton);
+                    fileList.appendChild(fileItem);
+                });
+            }
+            
+            // Show modal
+            const modal = new bootstrap.Modal(document.getElementById('fileSelectorModal'));
+            modal.show();
+            
+        } catch (error) {
+            console.error('Ошибка при загрузке списка файлов:', error);
+            alert('Ошибка при загрузке списка файлов');
+        }
+    }
+    
+    // Function to load selected file
+    async function loadSelectedFile(filePath) {
+        const loadStatus = document.getElementById('loadStatus');
+        
+        // Show loading status
+        loadStatus.textContent = 'Загрузка файла...';
+        loadStatus.className = 'text-info d-block mt-1';
+        
+        const formData = new FormData();
+        formData.append('file_path', filePath);
+        
+        try {
+            const response = await fetch('/load-file', {
+                method: 'POST',
+                body: formData
+            });
+            
+            const data = await response.json();
+            
+            if (data.status === 'success') {
+                loadStatus.textContent = data.message;
+                loadStatus.className = 'text-success d-block mt-1';
+                
+                // Close modal
+                const modal = bootstrap.Modal.getInstance(document.getElementById('fileSelectorModal'));
+                modal.hide();
+                
+                // Reload page to show new data
+                setTimeout(() => {
+                    window.location.reload();
+                }, 1000);
+            } else {
+                loadStatus.textContent = data.message;
+                loadStatus.className = 'text-danger d-block mt-1';
+            }
+        } catch (error) {
+            console.error('Ошибка при загрузке файла:', error);
+            loadStatus.textContent = 'Ошибка при загрузке файла';
+            loadStatus.className = 'text-danger d-block mt-1';
+        }
+    }
+    
+    // Функция для запуска скрапинга
+    async function startScraping() {
+        const btn = document.getElementById('scrapingBtn');
+        const spinner = document.getElementById('scrapingSpinner');
+        btn.disabled = true;
+        
+        // Показываем спиннер
+        spinner.style.display = 'inline-block';
+        
+        updateScrapingButton('running', 'Обновление данных...', 'btn-warning', true);
+        updateScrapingStatus('Запуск обновления данных...', 'text-info');
+        
+        try {
+            const response = await fetch('/run-scraping', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                }
+            });
+            
+            const data = await response.json();
+            
+            if (data.status === 'processing') {
+                startStatusPolling();
+            } else if (data.status === 'already_running') {
+                updateScrapingStatus('Задача уже выполняется', 'text-warning');
+                setTimeout(() => {
+                    updateScrapingButton('idle', 'Обновить данные', 'btn-outline-secondary', false);
+                    updateScrapingStatus('', 'text-muted');
+                    spinner.style.display = 'none';
+                }, 2000);
+            } else if (data.status === 'cooldown') {
+                updateScrapingButton('cooldown', `Подождите ${data.remaining}с`, 'btn-secondary', true);
+                updateScrapingStatus(`Кнопка недоступна еще ${data.remaining} секунд`, 'text-muted');
+                startCooldownCountdown(data.remaining);
+            }
+        } catch (error) {
+            console.error('Ошибка при запуске скрапинга:', error);
+            updateScrapingButton('failed', 'Ошибка запуска', 'btn-danger');
+            updateScrapingStatus('Ошибка при запуске задачи', 'text-danger');
+            setTimeout(() => {
+                updateScrapingButton('idle', 'Обновить данные', 'btn-outline-secondary', false);
+                updateScrapingStatus('', 'text-muted');
+                spinner.style.display = 'none';
+            }, 3000);
+        }
+    }
+    
+    // Функция для обновления кнопки
+    function updateScrapingButton(state, text, className, disabled = false) {
+        const btn = document.getElementById('scrapingBtn');
+        const btnContent = btn.querySelector('.btn-content span:last-child');
+        const icon = btn.querySelector('.bi');
+        const spinner = document.getElementById('scrapingSpinner');
+        
+        btnContent.textContent = text;
+        btn.className = `btn ${className}`;
+        btn.disabled = disabled;
+        
+        // Показываем/скрываем спиннер
+        if (state === 'running') {
+            spinner.style.display = 'inline-block';
+        } else {
+            spinner.style.display = 'none';
+        }
+        
+        // Обновляем иконку
+        if (state === 'running') {
+            icon.className = 'bi bi-hourglass-split';
+        } else if (state === 'completed') {
+            icon.className = 'bi bi-check-circle';
+        } else if (state === 'failed') {
+            icon.className = 'bi bi-exclamation-triangle';
+        } else {
+            icon.className = 'bi bi-arrow-repeat';
+        }
+    }
+    
+    // Функция для обновления статуса
+    function updateScrapingStatus(message, className) {
+        const statusEl = document.getElementById('scrapingStatus');
+        statusEl.textContent = message;
+        statusEl.className = `${className} d-block mt-1`;
+    }
+    
+    // Функция для остановки опроса статуса
+    function stopStatusPolling() {
+        if (statusPollingInterval) {
+            clearInterval(statusPollingInterval);
+            statusPollingInterval = null;
+        }
+        stopCooldownCountdown();
+    }
+    
+    // Функция для начала опроса статуса
+    function startStatusPolling() {
+        stopStatusPolling();
+        statusPollingInterval = setInterval(checkScrapingStatus, 1000);
+    }
+    
+    // Функция для запуска обратного отсчета кулдауна
+    function startCooldownCountdown(remainingSeconds) {
+        stopCooldownCountdown();
+        let secondsLeft = remainingSeconds;
+        
+        cooldownInterval = setInterval(() => {
+            secondsLeft--;
+            if (secondsLeft <= 0) {
+                stopCooldownCountdown();
+                updateScrapingButton('idle', 'Обновить данные', 'btn-outline-secondary', false);
+                updateScrapingStatus('', 'text-muted');
+            } else {
+                updateScrapingButton('cooldown', `Подождите ${secondsLeft}с`, 'btn-secondary', true);
+                updateScrapingStatus(`Кнопка недоступна еще ${secondsLeft} секунд`, 'text-muted');
+            }
+        }, 1000);
+    }
+    
+    // Функция для остановки обратного отсчета кулдауна
+    function stopCooldownCountdown() {
+        if (cooldownInterval) {
+            clearInterval(cooldownInterval);
+            cooldownInterval = null;
+        }
+    }
+    
+    // Функция для проверки статуса скрапинга
+    function checkScrapingStatus() {
+        fetch('/scraping-status')
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'running') {
+                    updateScrapingButton('running', 'Обновление данных...', 'btn-warning', true);
+                    updateScrapingStatus(`Обновление данных... (${data.elapsed}с)`, 'text-warning');
+                } else if (data.status === 'completed') {
+                    stopStatusPolling();
+                    updateScrapingButton('completed', 'Данные обновлены', 'btn-success');
+                    updateScrapingStatus('✓ Данные успешно обновлены', 'text-success');
+                    setTimeout(() => {
+                        updateScrapingButton('cooldown', 'Подождите 60с', 'btn-secondary', true);
+                        updateScrapingStatus('Кнопка недоступна 60 секунд', 'text-muted');
+                        startCooldownCountdown(60);
+                    }, 3000);
+                    setTimeout(() => window.location.reload(), 1000);
+                } else if (data.status === 'failed') {
+                    stopStatusPolling();
+                    updateScrapingButton('failed', 'Ошибка обновления', 'btn-danger');
+                    updateScrapingStatus(`Ошибка: ${data.result.error || 'неизвестная'}`, 'text-danger');
+                    setTimeout(() => {
+                        updateScrapingButton('idle', 'Обновить данные', 'btn-outline-secondary', false);
+                        updateScrapingStatus('', 'text-muted');
+                    }, 5000);
+                } else if (data.status === 'cooldown') {
+                    updateScrapingButton('cooldown', `Подождите ${data.remaining}с`, 'btn-secondary', true);
+                    updateScrapingStatus(`Кнопка недоступна еще ${data.remaining} секунд`, 'text-muted');
+                    startCooldownCountdown(data.remaining);
+                }
+            })
+            .catch(error => {
+                console.error('Ошибка при проверке статуса:', error);
+            });
+    }
+    </script>
+        
+        <!-- Поиск -->
+        <form method="get" class="mb-4" id='search_bar' onsubmit="saveScrollPosition()">
+            <div class="input-group">
+                <input type="text" name="search" value="{{ search }}" placeholder="Поиск..." class="form-control">
+                <button type="submit" class="btn btn-primary">Найти</button>
+            </div>
+        </form>
+
+        <!-- Блок фильтров -->
+        <div class="mb-4">
+            <div class="d-flex flex-wrap gap-3">
+                <!-- Кнопка "Только полезные" -->
+                <a 
+                    href="/?page=1&per_page={{ per_page }}&search={{ search }}&only_relevant={{ not only_relevant }}&has_keywords={{ has_keywords }}&sort_keywords={{ sort_keywords }}"
+                    class="btn {% if only_relevant %}btn-primary{% else %}btn-outline-primary{% endif %}"
+                >
+                    <i class="bi bi-check-circle"></i> Только релевантные   
+                </a>
+                
+                <!-- Кнопка "С ключевыми словами" -->
+                <a 
+                    href="/?page=1&per_page={{ per_page }}&search={{ search }}&only_relevant={{ only_relevant }}&has_keywords={{ not has_keywords }}&sort_keywords={{ sort_keywords }}"
+                    class="btn {% if has_keywords %}btn-primary{% else %}btn-outline-primary{% endif %}"
+                >
+                    <i class="bi bi-tags"></i> С ключевыми словами
+                </a>
+            </div>
+        </div>
+
+        <!-- Кнопка сортировки -->
+        <div class="mb-3">
+            <!-- В шаблоне -->
+            <a 
+                href="/?sort_keywords={% if sort_keywords == 'none' %}desc{% elif sort_keywords == 'desc' %}asc{% else %}none{% endif %}"
+                class="btn {% if sort_keywords != 'none' %}btn-primary{% else %}btn-outline-primary{% endif %}"
+            >
+                {% if sort_keywords == 'none' %}
+                    <i class="bi bi-filter-circle"></i> Кол-во ключевых слов
+                {% elif sort_keywords == 'desc' %}
+                    <i class="bi bi-sort-down"></i> Кол-во ключевых слов
+                {% else %}
+                    <i class="bi bi-sort-up"></i> Кол-во ключевых слов
+                {% endif %}
+            </a>
+        </div>
+
+        <nav>
+            <ul class="pagination justify-content-center">
+                <!-- Кнопка "В начало" -->
+                <li class="page-item {% if page == 1 %}disabled{% endif %}">
+                    <a 
+                        class="page-link" 
+                        href="/?page=1&per_page={{ per_page }}&search={{ search }}&only_relevant={{ only_relevant }}&has_keywords={{ has_keywords }}&sort_keywords={{ sort_keywords }}"
+                        aria-label="First"
+                    >
+                        <span aria-hidden="true">&laquo;&laquo;</span>
+                    </a>
+                </li>
+
+                <!-- Кнопка "Назад" -->
+                <li class="page-item {% if page == 1 %}disabled{% endif %}">
+                    <a 
+                        class="page-link" 
+                        href="/?page={{ page - 1 }}&per_page={{ per_page }}&search={{ search }}&only_relevant={{ only_relevant }}&has_keywords={{ has_keywords }}&sort_keywords={{ sort_keywords }}"
+                        aria-label="Previous"
+                    >
+                        <span aria-hidden="true">&laquo;</span>
+                    </a>
+                </li>
+
+                <!-- Номер текущей страницы -->
+                <li class="page-item disabled">
+                    <span class="page-link">
+                        Страница {{ page }} из {{ total_pages }}
+                    </span>
+                </li>
+
+                <!-- Кнопка "Вперед" -->
+                <li class="page-item {% if page == total_pages %}disabled{% endif %}">
+                    <a 
+                        class="page-link" 
+                        href="/?page={{ page + 1 }}&per_page={{ per_page }}&search={{ search }}&only_relevant={{ only_relevant }}&has_keywords={{ has_keywords }}&sort_keywords={{ sort_keywords }}"
+                        aria-label="Next"
+                    >
+                        <span aria-hidden="true">&raquo;</span>
+                    </a>
+                </li>
+
+                <!-- Кнопка "В конец" -->
+                <li class="page-item {% if page == total_pages %}disabled{% endif %}">
+                    <a 
+                        class="page-link" 
+                        href="/?page={{ total_pages }}&per_page={{ per_page }}&search={{ search }}&only_relevant={{ only_relevant }}&has_keywords={{ has_keywords }}&sort_keywords={{ sort_keywords }}"
+                        aria-label="Last"
+                    >
+                        <span aria-hidden="true">&raquo;&raquo;</span>
+                    </a>
+                </li>
+            </ul>
+        </nav>
+
+        <!-- Список записей -->
+        <div class="list-group mb-4">
+            {% for entry in items %}
+            <a 
+                href="/item/{{ entry.original_id }}?search={{ search }}&only_relevant={{ only_relevant }}&has_keywords={{ has_keywords }}&page={{ page }}&per_page={{ per_page }}&sort_keywords={{ sort_keywords }}" 
+                class="list-group-item list-group-item-action"
+            >
+                <div class="d-flex justify-content-between align-items-start">
+                    <div class="flex-grow-1">
+                        <div class="d-flex align-items-center mb-1">
+                            <h5 class="mb-0 me-2">{{ loop.index0 + (page - 1) * per_page + 1 }}. {{ entry.item.channel }}</h5>
+                            {% if entry.item.is_relevant %}
+                            <span class="badge bg-success">Relevant</span>
+                            {% endif %}
+                            {% if entry.item.matched_keywords %}
+                            <span class="badge bg-primary ms-2">{{ entry.item.matched_keywords|length }} <i class="bi bi-tags"></i></span>
+                            {% endif %}
+                        </div>
+                        <small class="text-muted">{{ entry.item.date}}</small>
+                        <div class="text-truncate mt-1">{{ entry.item.text[:100] }}...</div>
+                    </div>
+                </div>
+            </a>
+            {% endfor %}
+        </div>
+
+        <nav>
+            <ul class="pagination justify-content-center">
+                <!-- Кнопка "В начало" -->
+                <li class="page-item {% if page == 1 %}disabled{% endif %}">
+                    <a 
+                        class="page-link" 
+                        href="/?page=1&per_page={{ per_page }}&search={{ search }}&only_relevant={{ only_relevant }}&has_keywords={{ has_keywords }}&sort_keywords={{ sort_keywords }}"
+                        aria-label="First"
+                    >
+                        <span aria-hidden="true">&laquo;&laquo;</span>
+                    </a>
+                </li>
+
+                <!-- Кнопка "Назад" -->
+                <li class="page-item {% if page == 1 %}disabled{% endif %}">
+                    <a 
+                        class="page-link" 
+                        href="/?page={{ page - 1 }}&per_page={{ per_page }}&search={{ search }}&only_relevant={{ only_relevant }}&has_keywords={{ has_keywords }}&sort_keywords={{ sort_keywords }}"
+                        aria-label="Previous"
+                    >
+                        <span aria-hidden="true">&laquo;</span>
+                    </a>
+                </li>
+
+                <!-- Номер текущей страницы -->
+                <li class="page-item disabled">
+                    <span class="page-link">
+                        Страница {{ page }} из {{ total_pages }}
+                    </span>
+                </li>
+
+                <!-- Кнопка "Вперед" -->
+                <li class="page-item {% if page == total_pages %}disabled{% endif %}">
+                    <a 
+                        class="page-link" 
+                        href="/?page={{ page + 1 }}&per_page={{ per_page }}&search={{ search }}&only_relevant={{ only_relevant }}&has_keywords={{ has_keywords }}&sort_keywords={{ sort_keywords }}"
+                        aria-label="Next"
+                    >
+                        <span aria-hidden="true">&raquo;</span>
+                    </a>
+                </li>
+
+                <!-- Кнопка "В конец" -->
+                <li class="page-item {% if page == total_pages %}disabled{% endif %}">
+                    <a 
+                        class="page-link" 
+                        href="/?page={{ total_pages }}&per_page={{ per_page }}&search={{ search }}&only_relevant={{ only_relevant }}&has_keywords={{ has_keywords }}&sort_keywords={{ sort_keywords }}"
+                        aria-label="Last"
+                    >
+                        <span aria-hidden="true">&raquo;&raquo;</span>
+                    </a>
+                </li>
+            </ul>
+        </nav>
+    </div>
+    
+    <!-- File Selection Modal -->
+    <div class="modal fade" id="fileSelectorModal" tabindex="-1" aria-labelledby="fileSelectorModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="fileSelectorModalLabel">Выберите JSON файл</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div id="fileList" class="list-group">
+                        <!-- Files will be loaded here -->
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Отмена</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
